@@ -2,22 +2,24 @@
 
 ## 1. 프로젝트 소개
 
-이 프로젝트는 사용자가 여행 날짜를 입력하면 LLM API와 지도/장소 검색 API를 조합하여 국내 여행 추천 리포트를 생성하는 CLI 기반 Python 프로그램입니다.
+이 프로젝트는 사용자가 여행 날짜를 입력하면 **LLM API**와 **지도/장소 검색 API**를 조합하여 국내 여행 추천 리포트를 생성하는 CLI 기반 Python 프로그램입니다.
 
-사용자가 `-date "YYYY-MM-DD"` 형식으로 여행 날짜를 입력하면, 프로그램은 먼저 LLM API를 통해 해당 시기에 여행하기 좋은 국내 지역을 추천받습니다. 이후 추천된 지역명을 Kakao Local API의 장소 검색 입력값으로 사용하여 맛집 정보를 검색하고, 최종적으로 LLM API를 다시 호출해 Markdown 형식의 여행 리포트를 생성합니다.
+사용자가 터미널에서 `-date "YYYY-MM-DD"` 형식으로 여행 날짜를 입력하면, 프로그램은 먼저 LLM API를 통해 해당 날짜에 여행하기 좋은 국내 지역을 추천받습니다. 이후 추천된 지역명을 Kakao Local API의 장소 검색 입력값으로 사용하여 맛집 정보를 검색하고, 최종적으로 LLM API를 다시 호출해 Markdown 형식의 여행 리포트를 생성합니다.
 
-단일 API 호출이 아니라, LLM API의 구조화된 출력 결과를 다음 API 호출의 입력으로 연결하는 흐름을 구현한 것이 핵심입니다.
+이 프로젝트의 핵심은 단일 API 호출이 아니라, **LLM이 생성한 구조화된 JSON 결과를 다음 API 호출의 입력값으로 연결하는 흐름**을 구현한 것입니다.
 
 ---
 
 ## 2. 프로젝트 목표
 
-- REST API 요청/응답 구조 이해
-- HTTP GET/POST 방식의 차이 이해
+이 프로젝트의 목표는 다음과 같습니다.
+
+- REST API의 요청/응답 구조 이해
+- HTTP 메서드 중 GET/POST 방식의 차이 이해
 - LLM 출력 결과를 JSON으로 구조화하여 다음 단계 입력으로 활용
-- 외부 API 호출 시 발생할 수 있는 오류 처리
-- API 키를 코드에 직접 작성하지 않고 환경 변수로 관리
-- 여러 API 결과를 조합하여 최종 Markdown 리포트 생성
+- 외부 API 호출 중 발생할 수 있는 인증/쿼터/네트워크/파싱 오류 처리
+- API 키를 코드에 직접 작성하지 않고 `.env` 또는 환경변수로 관리
+- 여러 API 결과를 조합하여 최종 Markdown 여행 리포트 생성
 
 ---
 
@@ -52,7 +54,7 @@ python3 travel_planner.py -date "2026-03-15"
 python3 travel_planner.py --date "2026-03-15"
 ```
 
-날짜 형식이 `YYYY-MM-DD`가 아니면 오류 메시지를 출력하고 종료합니다.
+날짜 형식이 `YYYY-MM-DD`가 아니면 오류 메시지를 출력하고 프로그램을 종료합니다.
 
 ---
 
@@ -60,7 +62,18 @@ python3 travel_planner.py --date "2026-03-15"
 
 입력된 날짜를 기준으로 Gemini API에 국내 여행지 추천을 요청합니다.
 
-LLM 응답은 다음과 같은 JSON 구조로 파싱됩니다.
+LLM 응답은 반드시 JSON으로 파싱 가능한 형태가 되도록 프롬프트를 설계했습니다.
+
+1차 추천 JSON의 필수 스키마는 다음과 같습니다.
+
+| Key | Type | 설명 |
+|---|---|---|
+| recommended_city | string | 추천 지역 |
+| weather | string | 해당 시기의 일반적 날씨 요약 |
+| events | array | 행사/축제 후보 1~3개 |
+| reason | string | 추천 근거 |
+
+예시 구조:
 
 ```json
 {
@@ -74,22 +87,13 @@ LLM 응답은 다음과 같은 JSON 구조로 파싱됩니다.
 }
 ```
 
-필수 키는 다음과 같습니다.
-
-| Key | Type | 설명 |
-|---|---|---|
-| recommended_city | string | 추천 지역 |
-| weather | string | 해당 시기의 일반적 날씨 요약 |
-| events | array | 행사/축제 후보 |
-| reason | string | 추천 근거 |
-
 ---
 
 ### 4.3 Kakao Local API를 통한 맛집 검색
 
 LLM이 추천한 지역명을 Kakao Local API 검색어로 사용합니다.
 
-예를 들어 추천 지역이 `제주`이면 다음과 같은 검색어를 사용합니다.
+예를 들어 추천 지역이 `제주`라면 다음 검색어를 사용합니다.
 
 ```text
 제주 맛집
@@ -208,7 +212,7 @@ requests
 
 ### 7.1 `.env.example`
 
-제출용 예시 파일에는 실제 키를 넣지 않습니다.
+제출용 예시 파일에는 실제 API 키를 넣지 않습니다.
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
@@ -400,7 +404,7 @@ Kakao Local API 호출이 실패하더라도 프로그램은 중단되지 않습
 → results/ 폴더에 JSON과 MD 저장
 ```
 
-### REST API와 HTTP 메서드
+### 12.1 REST API와 HTTP 메서드
 
 Kakao Local API는 HTTP GET 방식으로 호출했습니다.
 
@@ -414,43 +418,94 @@ LLM API는 SDK를 통해 호출했지만, 개념적으로는 사용자의 프롬
 
 ### 13.1 프로젝트 폴더 구조
 
+프로젝트의 주요 파일과 폴더 구조입니다.
+
 ![Project Structure](./screenshots/01_project_structure.png)
+
+---
 
 ### 13.2 환경 변수 예시 파일
 
+실제 API 키가 아닌 예시 키만 포함된 `.env.example` 파일입니다.
+
 ![Environment Example](./screenshots/02_env_example.png)
+
+---
 
 ### 13.3 CLI 실행 화면
 
+`-date` 옵션으로 프로그램을 실행하고, 진행 로그와 결과 저장 경로가 출력되는 화면입니다.
+
 ![CLI Run](./screenshots/03_cli_run.png)
+
+---
 
 ### 13.4 결과 폴더 생성 화면
 
+실행 후 `results/` 폴더에 원본 JSON 파일과 최종 Markdown 리포트가 생성된 화면입니다.
+
 ![Results Folder](./screenshots/04_results_folder.png)
+
+---
 
 ### 13.5 원본 JSON 결과
 
+1차 추천 JSON, 맛집 검색 결과, 오류 목록이 포함된 원본 데이터 파일입니다.
+
 ![Raw JSON](./screenshots/05_raw_json.png)
+
+---
 
 ### 13.6 최종 Markdown 리포트
 
+LLM API가 생성한 최종 국내 여행 추천 리포트입니다.
+
 ![Markdown Report](./screenshots/06_markdown_report.png)
+
+---
 
 ### 13.7 오류 처리 화면
 
+날짜 형식 오류 등 잘못된 입력에 대해 프로그램이 오류 메시지를 출력하는 화면입니다.
+
 ![Error Handling](./screenshots/07_error_handling.png)
 
+---
+
 ### 13.8 GitHub 저장소 화면
+
+GitHub 저장소에 프로그램 코드, README, 결과물, 스크린샷이 업로드된 화면입니다.
 
 ![GitHub Repository](./screenshots/08_github_repo.png)
 
 ---
 
-## 14. 테스트 결과
+## 14. 스크린샷 파일명 안내
+
+README에서 이미지를 정상적으로 표시하려면 `screenshots/` 폴더 안의 파일명이 아래와 정확히 같아야 합니다.
+
+```text
+screenshots/
+├── 01_project_structure.png
+├── 02_env_example.png
+├── 03_cli_run.png
+├── 04_results_folder.png
+├── 05_raw_json.png
+├── 06_markdown_report.png
+├── 07_error_handling.png
+└── 08_github_repo.png
+```
+
+파일명은 대소문자와 확장자까지 정확히 일치해야 합니다.
+
+---
+
+## 15. 테스트 결과
 
 | 테스트 항목 | 결과 |
 |---|---|
 | `-date` 입력 실행 | 정상 |
+| `--date` 입력 실행 | 정상 |
 | 날짜 형식 검증 | 정상 |
 | Gemini API 추천 JSON 생성 | 정상 |
 | LLM JSON 파싱 | 정상 |
@@ -463,7 +518,7 @@ LLM API는 SDK를 통해 호출했지만, 개념적으로는 사용자의 프롬
 
 ---
 
-## 15. 구현 과정에서 이해한 점
+## 16. 구현 과정에서 이해한 점
 
 이번 프로젝트를 통해 API를 단순히 한 번 호출하는 것이 아니라, 한 API의 결과를 다음 API의 입력으로 연결하는 방식을 경험했습니다.
 
@@ -475,7 +530,7 @@ API 키는 코드에 직접 작성하지 않고 `.env` 파일과 환경 변수�
 
 ---
 
-## 16. 프로젝트 요약
+## 17. 프로젝트 요약
 
 AI 국내 여행 추천 CLI 프로그램은 사용자가 입력한 날짜를 기준으로 LLM API가 여행지를 추천하고, Kakao Local API가 해당 지역의 맛집 정보를 검색한 뒤, 최종 Markdown 여행 리포트를 생성하는 프로그램입니다.
 
