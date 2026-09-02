@@ -19,6 +19,7 @@
 - 외부 API 호출 시 발생하는 인증/쿼터/네트워크/파싱 오류 처리
 - API 키를 코드에 직접 작성하지 않고 `.env` 또는 환경변수로 관리
 - 원본 JSON 데이터와 최종 Markdown 리포트 저장
+- 같은 날짜 재실행 시 기존 raw data를 재사용하는 간단한 캐시 흐름 구현
 
 ---
 
@@ -57,7 +58,8 @@ ai-travel-api-planner/
     ├── 05_raw_json.png
     ├── 06_markdown_report.png
     ├── 07_error_handling.png
-    └── 08_github_repo.png
+    ├── 08_cache_reuse.png
+    └── 09_github_repo.png
 ```
 
 ---
@@ -258,10 +260,13 @@ results/
 | check_api_keys() | `.env` 또는 환경변수에서 API 키 존재 여부 확인 |
 | extract_json_from_text() | LLM 응답에서 JSON 부분만 추출 |
 | validate_recommendation_schema() | 추천 JSON의 필수 키와 타입 검사 |
+| normalize_city_name() | 지도 API 검색에 사용하기 쉽도록 도시명 일부 정규화 |
 | get_travel_recommendation() | Gemini API를 호출하여 1차 추천 JSON 생성 |
 | search_restaurants() | Kakao Local API를 호출하여 맛집 검색 |
 | generate_markdown_report() | 추천 JSON과 맛집 데이터를 바탕으로 최종 Markdown 리포트 생성 |
 | generate_fallback_report() | 최종 리포트 생성 실패 시 기본 Markdown 리포트 생성 |
+| get_cached_raw_data() | 같은 날짜의 raw_data.json이 이미 있으면 기존 데이터 불러오기 |
+| save_report_only() | 캐시 사용 시 최종 Markdown 리포트만 다시 저장 |
 | save_results() | 원본 JSON과 최종 Markdown 파일 저장 |
 | main() | 전체 실행 흐름 제어 |
 
@@ -274,10 +279,13 @@ results/
 → argparse로 CLI 인자 처리
 → 날짜 형식 검증
 → .env에서 API 키 확인
-→ Gemini API 호출
+→ results/{date}_raw_data.json 캐시 존재 여부 확인
+→ 캐시가 있으면 기존 추천 JSON과 맛집 목록 재사용
+→ 캐시가 없으면 Gemini API 호출
 → 추천 지역 JSON 생성
 → JSON 필수 키와 타입 검증
 → recommended_city 추출
+→ 도시명 정규화
 → Kakao Local API 호출
 → 맛집 검색 결과 정규화
 → Gemini API 재호출
@@ -410,12 +418,17 @@ LLM이 추천한 도시명이 항상 지도 API 검색에 적합한 형태로 �
 부산광역시 해운대구 → 부산 해운대
 ```
 
-현재 구현에서는 LLM의 `recommended_city` 값을 그대로 사용하되, 향후에는 다음과 같은 정규화 전략을 추가할 수 있습니다.
+이를 위해 `normalize_city_name()` 함수에서 일부 행정구역 표현을 정리합니다.
 
-- `특별시`, `광역시`, `도`, `시`, `군`, `구` 등 행정구역 단어 제거 또는 축약
-- 너무 넓은 지역이면 대표 도시명으로 변환
-- 세부 지역이 포함된 경우 핵심 검색어만 추출
-- 검색 결과가 0건이면 `도시명 + 맛집` 대신 `도시명 + 음식점`으로 재검색
+현재 정규화 예시는 다음과 같습니다.
+
+- `제주도`, `제주특별자치도` → `제주`
+- `서울특별시` → `서울`
+- `부산광역시` → `부산`
+- `강원도 강릉시` → `강릉`
+- `특별시`, `광역시`, `특별자치도`, `특별자치시`, `시` 표현 제거
+
+이 과정을 통해 Kakao Local API 검색어가 더 간단해지고 검색 성공률을 높일 수 있습니다.
 
 ---
 
@@ -521,18 +534,35 @@ Kakao Local API에서 401 또는 403 오류가 발생하면 맛집 데이터를 
 
 ---
 
-## 20. 캐시 전략
+## 20. 캐시 구현
 
-현재 기본 구현은 매번 API를 호출하여 최신 결과를 생성합니다.
+같은 날짜로 프로그램을 다시 실행할 경우, 실행 초기에 `results/{date}_raw_data.json` 파일이 이미 존재하는지 확인합니다.
 
-다만 같은 날짜로 반복 실행할 경우 API 비용과 시간을 줄이기 위해 다음과 같은 캐시 전략을 적용할 수 있습니다.
+파일이 존재하면 Gemini 1차 추천 API와 Kakao Local API 맛집 검색을 다시 호출하지 않고, 기존 `raw_data.json`을 불러와 사용합니다.
+
+그 후 기존 추천 데이터와 맛집 데이터를 바탕으로 최종 Markdown 리포트만 다시 생성합니다.
+
+캐시 사용 흐름은 다음과 같습니다.
 
 ```text
-1. results/{date}_raw_data.json 파일이 이미 존재하는지 확인
-2. 파일이 있으면 Gemini 1차 추천과 Kakao 맛집 검색을 다시 호출하지 않음
-3. 기존 raw_data.json을 읽어 최종 리포트만 재생성하거나 그대로 사용
-4. 파일이 없으면 API를 새로 호출하고 결과를 저장
+프로그램 실행
+→ results/{date}_raw_data.json 존재 여부 확인
+→ 파일이 있으면 기존 recommendation, restaurants, errors 불러오기
+→ Gemini 1차 추천과 Kakao 맛집 검색 생략
+→ 최종 Markdown 리포트만 재생성
 ```
+
+캐시 사용 시 터미널에는 다음과 같은 로그가 출력됩니다.
+
+```text
+[캐시] 기존 원본 데이터 발견: results/2026-03-15_raw_data.json
+[캐시] Gemini 1차 추천과 Kakao 맛집 검색을 건너뜁니다.
+[1/3] 캐시된 1차 추천 데이터 사용 중...
+  - recommended_city: "제주"
+  - 캐시된 맛집 데이터 5건 사용
+```
+
+이를 통해 같은 날짜를 반복 테스트할 때 API 호출 비용과 실행 시간을 줄일 수 있습니다.
 
 ---
 
@@ -635,11 +665,17 @@ LLM API가 생성한 최종 국내 여행 추천 리포트입니다.
 
 ![Error Handling](./screenshots/07_error_handling.png)
 
-### 22.8 GitHub 저장소 화면
+### 22.8 캐시 재사용 화면
+
+같은 날짜로 다시 실행했을 때 기존 raw_data.json을 재사용하고 API 호출을 건너뛰는 화면입니다.
+
+![Cache Reuse](./screenshots/08_cache_reuse.png)
+
+### 22.9 GitHub 저장소 화면
 
 GitHub 저장소에 프로그램 코드, README, 결과물, 스크린샷이 업로드된 화면입니다.
 
-![GitHub Repository](./screenshots/08_github_repo.png)
+![GitHub Repository](./screenshots/09_github_repo.png)
 
 ---
 
@@ -656,7 +692,8 @@ screenshots/
 ├── 05_raw_json.png
 ├── 06_markdown_report.png
 ├── 07_error_handling.png
-└── 08_github_repo.png
+├── 08_cache_reuse.png
+└── 09_github_repo.png
 ```
 
 파일명은 대소문자와 확장자까지 정확히 일치해야 합니다.
@@ -678,6 +715,7 @@ screenshots/
 | 결과 JSON 파일 저장 | 정상 |
 | API 키 미설정 오류 처리 | 정상 |
 | 지도 API 실패 시 리포트 계속 생성 | 정상 |
+| 같은 날짜 재실행 시 raw_data.json 캐시 재사용 | 정상 |
 
 ---
 
@@ -691,10 +729,12 @@ screenshots/
 
 API 키는 코드에 직접 작성하지 않고 `.env` 파일과 환경 변수를 통해 관리했습니다. 이를 통해 GitHub에 코드를 공개하더라도 민감한 키가 노출되지 않도록 했습니다.
 
+추가로 같은 날짜로 반복 실행할 때는 기존 raw_data.json을 재사용하도록 캐시 로직을 구현하여 API 호출 비용과 시간을 줄일 수 있도록 했습니다.
+
 ---
 
 ## 26. 프로젝트 요약
 
 AI 국내 여행 추천 CLI 프로그램은 사용자가 입력한 날짜를 기준으로 LLM API가 여행지를 추천하고, Kakao Local API가 해당 지역의 맛집 정보를 검색한 뒤, 최종 Markdown 여행 리포트를 생성하는 프로그램입니다.
 
-이 프로젝트는 CLI 입력, REST API 호출, LLM JSON 파싱, API 간 데이터 연결, 예외 처리, 결과 파일 저장, 환경 변수 기반 API 키 관리까지 포함한 API 연동 실습 프로젝트입니다.
+이 프로젝트는 CLI 입력, REST API 호출, LLM JSON 파싱, API 간 데이터 연결, 예외 처리, 결과 파일 저장, 캐시 재사용, 환경 변수 기반 API 키 관리까지 포함한 API 연동 실습 프로젝트입니다.

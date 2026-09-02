@@ -56,6 +56,7 @@ def check_api_keys():
         print("프로젝트 폴더에 .env 파일을 만들고 아래처럼 입력하세요.")
         print("GEMINI_API_KEY=your_gemini_api_key_here")
         print("KAKAO_REST_API_KEY=your_kakao_rest_api_key_here")
+        print("GEMINI_MODEL=gemini-2.5-flash")
         sys.exit(1)
 
     return gemini_key, kakao_key
@@ -101,6 +102,44 @@ def validate_recommendation_schema(data):
     return True
 
 
+def normalize_city_name(city):
+    """
+    지도 API 검색 성공률을 높이기 위한 간단한 도시명 정규화 함수.
+    현재는 대표적인 행정구역 표현만 정리한다.
+    """
+    if not city:
+        return ""
+
+    normalized = city.strip()
+
+    replacements = {
+        "제주도": "제주",
+        "제주특별자치도": "제주",
+        "서울특별시": "서울",
+        "부산광역시": "부산",
+        "대구광역시": "대구",
+        "인천광역시": "인천",
+        "광주광역시": "광주",
+        "대전광역시": "대전",
+        "울산광역시": "울산",
+        "세종특별자치시": "세종",
+        "강원도 강릉시": "강릉",
+        "강릉시": "강릉"
+    }
+
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
+
+    normalized = normalized.replace("특별시", "")
+    normalized = normalized.replace("광역시", "")
+    normalized = normalized.replace("특별자치시", "")
+    normalized = normalized.replace("특별자치도", "")
+    normalized = normalized.replace("시", "")
+    normalized = normalized.strip()
+
+    return normalized
+
+
 def get_travel_recommendation(date_text, gemini_key, errors):
     client = genai.Client(api_key=gemini_key)
     model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
@@ -128,6 +167,7 @@ def get_travel_recommendation(date_text, gemini_key, errors):
     retry_prompt = f"""
 이전 응답을 JSON으로 파싱할 수 없었습니다.
 아래 형식을 반드시 지켜 JSON만 다시 출력하세요.
+설명 문장, 마크다운, 코드블록은 절대 포함하지 마세요.
 
 {{
   "recommended_city": "도시명",
@@ -173,8 +213,10 @@ def search_restaurants(city, kakao_key, errors, size=5):
         "Authorization": f"KakaoAK {kakao_key}"
     }
 
+    normalized_city = normalize_city_name(city)
+
     params = {
-        "query": f"{city} 맛집",
+        "query": f"{normalized_city} 맛집",
         "size": size
     }
 
@@ -215,7 +257,7 @@ def search_restaurants(city, kakao_key, errors, size=5):
             errors.append({
                 "step": "place_search",
                 "type": "EMPTY_RESULT",
-                "message": f"0 results for query={city} 맛집"
+                "message": f"0 results for query={normalized_city} 맛집"
             })
             print("  - 검색 결과 0건")
             return []
@@ -375,6 +417,46 @@ def generate_fallback_report(date_text, recommendation, restaurants, errors):
     return "\n".join(lines)
 
 
+def get_cached_raw_data(date_text):
+    """
+    같은 날짜의 raw_data.json 파일이 이미 있으면 불러온다.
+    있으면 Gemini 1차 추천과 Kakao 맛집 검색을 다시 호출하지 않는다.
+    """
+    raw_json_path = RESULTS_DIR / f"{date_text}_raw_data.json"
+
+    if not raw_json_path.exists():
+        return None
+
+    try:
+        with open(raw_json_path, "r", encoding="utf-8") as file:
+            cached_data = json.load(file)
+
+        print(f"[캐시] 기존 원본 데이터 발견: {raw_json_path}")
+        print("[캐시] Gemini 1차 추천과 Kakao 맛집 검색을 건너뜁니다.")
+
+        return cached_data
+
+    except Exception as error:
+        print("[캐시] 기존 raw_data.json을 읽는 중 오류가 발생했습니다.")
+        print("[캐시] 캐시를 사용하지 않고 API를 새로 호출합니다.")
+        print(f"[캐시 오류] {error}")
+        return None
+
+
+def save_report_only(date_text, report):
+    """
+    캐시 데이터를 사용한 경우 최종 Markdown 리포트만 다시 저장한다.
+    """
+    RESULTS_DIR.mkdir(exist_ok=True)
+
+    report_path = RESULTS_DIR / f"{date_text}_travel_plan.md"
+
+    with open(report_path, "w", encoding="utf-8") as file:
+        file.write(report)
+
+    return report_path
+
+
 def save_results(date_text, recommendation, restaurants, report, errors):
     RESULTS_DIR.mkdir(exist_ok=True)
 
@@ -411,18 +493,31 @@ def main():
     gemini_key, kakao_key = check_api_keys()
     errors = []
 
-    print("[1/3] 1차 추천 생성 중(LLM)...")
-    recommendation = get_travel_recommendation(date_text, gemini_key, errors)
-    city = recommendation.get("recommended_city", "")
-    print(f'  - recommended_city: "{city}"')
+    cached_data = get_cached_raw_data(date_text)
 
-    print("[2/3] 맛집 검색 중(지도/장소 API)...")
-    restaurants = search_restaurants(city, kakao_key, errors, size=5)
+    if cached_data:
+        print("[1/3] 캐시된 1차 추천 데이터 사용 중...")
+        recommendation = cached_data.get("recommendation", {})
+        restaurants = cached_data.get("restaurants", [])
+        errors = cached_data.get("errors", [])
 
-    if restaurants:
-        print(f"  - 맛집 {len(restaurants)}곳 검색 완료")
+        city = recommendation.get("recommended_city", "")
+        print(f'  - recommended_city: "{city}"')
+        print(f"  - 캐시된 맛집 데이터 {len(restaurants)}건 사용")
+
     else:
-        print("  - 맛집 데이터 없음")
+        print("[1/3] 1차 추천 생성 중(LLM)...")
+        recommendation = get_travel_recommendation(date_text, gemini_key, errors)
+        city = recommendation.get("recommended_city", "")
+        print(f'  - recommended_city: "{city}"')
+
+        print("[2/3] 맛집 검색 중(지도/장소 API)...")
+        restaurants = search_restaurants(city, kakao_key, errors, size=5)
+
+        if restaurants:
+            print(f"  - 맛집 {len(restaurants)}곳 검색 완료")
+        else:
+            print("  - 맛집 데이터 없음")
 
     print("[3/3] 최종 리포트 생성 중(LLM)...")
     report = generate_markdown_report(
@@ -434,13 +529,17 @@ def main():
     )
     print("  - 리포트 생성 완료")
 
-    raw_json_path, report_path = save_results(
-        date_text=date_text,
-        recommendation=recommendation,
-        restaurants=restaurants,
-        report=report,
-        errors=errors
-    )
+    if cached_data:
+        report_path = save_report_only(date_text, report)
+        raw_json_path = RESULTS_DIR / f"{date_text}_raw_data.json"
+    else:
+        raw_json_path, report_path = save_results(
+            date_text=date_text,
+            recommendation=recommendation,
+            restaurants=restaurants,
+            report=report,
+            errors=errors
+        )
 
     print()
     print("완료!")
